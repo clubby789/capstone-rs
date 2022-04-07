@@ -1,4 +1,4 @@
-use alloc::{self, boxed::Box};
+use alloc::{self, alloc::Layout, boxed::Box};
 use core::convert::{TryFrom, TryInto};
 use core::fmt::{self, Debug, Display, Error, Formatter};
 use core::marker::PhantomData;
@@ -26,6 +26,9 @@ use crate::ffi::str_from_cstr_ptr;
 /// ```
 #[derive(Debug)]
 pub struct Instructions<'a>(&'a mut [cs_insn]);
+
+#[derive(Debug)]
+pub struct OwnedInstructions<'a>(Box<[cs_insn]>, PhantomData<&'a [cs_insn]>);
 
 /// Integer type used in `InsnId`
 pub type InsnIdInt = u32;
@@ -128,6 +131,95 @@ impl<'a> Instructions<'a> {
 
     pub(crate) fn new_empty() -> Instructions<'a> {
         Instructions(&mut [])
+    }
+
+    pub fn to_owned(&self) -> OwnedInstructions {
+        let layout = Layout::for_value(self.0);
+        let n_items = self.0.len();
+        let mut insns = OwnedInstructions(
+            unsafe {
+                let data = alloc::alloc::alloc(layout) as *mut cs_insn;
+                core::ptr::copy(self.0.as_ptr(), data, n_items);
+                Box::from_raw(slice::from_raw_parts_mut(data, n_items))
+            },
+            PhantomData,
+        );
+        insns.0.iter_mut().for_each(|ins: &mut cs_insn| {
+            ins.detail = if ins.detail.is_null() {
+                ins.detail
+            } else {
+                unsafe {
+                    let new_detail = Box::new(*ins.detail);
+                    Box::into_raw(new_detail)
+                }
+            }
+        });
+        insns
+    }
+}
+
+impl From<&'_ Instructions<'_>> for OwnedInstructions<'_> {
+    fn from(instructions: &'_ Instructions) -> Self {
+        let layout = Layout::for_value(instructions.0);
+        let n_items = instructions.0.len();
+        let mut insns = OwnedInstructions(
+            unsafe {
+                let data = alloc::alloc::alloc(layout) as *mut cs_insn;
+                core::ptr::copy(instructions.0.as_ptr(), data, n_items);
+                Box::from_raw(slice::from_raw_parts_mut(data, n_items))
+            },
+            PhantomData,
+        );
+        insns.0.iter_mut().for_each(|ins: &mut cs_insn| {
+            ins.detail = if ins.detail.is_null() {
+                ins.detail
+            } else {
+                unsafe {
+                    let new_detail = Box::new(*ins.detail);
+                    Box::into_raw(new_detail)
+                }
+            }
+        });
+        insns
+    }
+}
+
+impl<'a> Drop for OwnedInstructions<'a> {
+    fn drop(&mut self) {
+        // First free all the detail pointers
+        self.0.iter_mut().for_each(|insn: &mut cs_insn| {
+            if !insn.detail.is_null() {
+                // SAFETY: `insn.detail` should be a `Box`-allocated pointer to a cs_detail
+                drop(Box::from(insn.detail))
+            }
+        });
+    }
+}
+
+impl<'a> Display for OwnedInstructions<'a> {
+    fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
+        for instruction in self.iter() {
+            display_group_instructions(instruction, fmt)?;
+            writeln!(fmt)?;
+        }
+        Ok(())
+    }
+}
+
+impl<'a> core::ops::Deref for OwnedInstructions<'a> {
+    type Target = [Insn<'a>];
+
+    #[inline]
+    fn deref(&self) -> &[Insn<'a>] {
+        // SAFETY: `cs_insn` has the same memory layout as `Insn`
+        unsafe { slice::from_raw_parts(self.0.as_ptr() as *const Insn, self.0.len()) }
+    }
+}
+
+impl<'a> AsRef<[Insn<'a>]> for OwnedInstructions<'a> {
+    #[inline]
+    fn as_ref(&self) -> &[Insn<'a>] {
+        self.deref()
     }
 }
 
@@ -434,24 +526,29 @@ impl<'a> Debug for InsnDetail<'a> {
 impl<'a> Display for Instructions<'a> {
     fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
         for instruction in self.iter() {
-            write!(fmt, "{:x}:\t", instruction.address())?;
-            for byte in instruction.bytes() {
-                write!(fmt, " {:02x}", byte)?;
-            }
-            let remainder = 16 * 3 - instruction.bytes().len() * 3;
-            for _ in 0..remainder {
-                write!(fmt, " ")?;
-            }
-            if let Some(mnemonic) = instruction.mnemonic() {
-                write!(fmt, " {}", mnemonic)?;
-                if let Some(op_str) = instruction.op_str() {
-                    write!(fmt, " {}", op_str)?;
-                }
-            }
+            display_group_instructions(instruction, fmt)?;
             writeln!(fmt)?;
         }
         Ok(())
     }
+}
+
+fn display_group_instructions(instruction: &Insn, fmt: &mut Formatter) -> fmt::Result {
+    write!(fmt, "{:x}:\t", instruction.address())?;
+    for byte in instruction.bytes() {
+        write!(fmt, " {:02x}", byte)?;
+    }
+    let remainder = 16 * 3 - instruction.bytes().len() * 3;
+    for _ in 0..remainder {
+        write!(fmt, " ")?;
+    }
+    if let Some(mnemonic) = instruction.mnemonic() {
+        write!(fmt, " {}", mnemonic)?;
+        if let Some(op_str) = instruction.op_str() {
+            write!(fmt, " {}", op_str)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

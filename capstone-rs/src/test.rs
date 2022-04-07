@@ -3231,3 +3231,20 @@ fn test_owned_insn() {
         assert_eq!(format!("{:?}", insn), format!("{:?}", owned));
     }
 }
+
+#[test]
+fn test_owned_insn_slice() {
+    let cs = Capstone::new()
+        .x86()
+        .mode(x86::ArchMode::Mode64)
+        .detail(false)
+        .build()
+        .unwrap();
+    let insns = cs.disasm_all(X86_CODE, START_TEST_ADDR).unwrap();
+    let owned: OwnedInstructions = (&insns).into();
+
+    for (insn, owned) in insns.iter().zip(owned.iter()) {
+        assert_eq!(format!("{:?}", insn), format!("{:?}", owned));
+    }
+    assert_eq!(format!("{}", &insns), format!("{}", &insns));
+}
